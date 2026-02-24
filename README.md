@@ -134,7 +134,7 @@ esphome run weather-dashboard/weather-dashboard.yaml
 
 ## Notes
 
-- The display refreshes every **30 minutes** (driven by the SHT40 `on_value` callback at `update_interval: 1800s`). Color ePaper takes ~30 seconds to complete a full refresh.
+- The display refreshes every **hour** (driven by the SHT40 `on_value` callback at `update_interval: 3600s`). Color ePaper takes ~30 seconds to complete a full refresh.
 - `update_interval: never` on the display component is intentional — the SHT40 sensor triggers the update.
 - Requires **ESPHome ≥ 2025.11.0** for the `Seeed-reTerminal-E1002` display model.
 - The Arduino framework is mandatory for 8 MB PSRAM support.

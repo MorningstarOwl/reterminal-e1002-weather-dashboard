@@ -119,7 +119,7 @@ sensor:
   # ── Internal SHT40 (Indoor) ─────────────────────────────────────────────────
   - platform: sht4x
     address: 0x44
-    update_interval: 1800s
+    update_interval: 3600s
     temperature:
       name: "Indoor Temperature"
       id: indoor_temp
