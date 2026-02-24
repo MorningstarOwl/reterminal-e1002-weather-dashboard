@@ -1,0 +1,470 @@
+################################################################################
+# reTerminal E1002 – Weather Dashboard
+# Hardware: Seeed Studio reTerminal E1002
+#   - 7.3" E Ink Spectra 6 color ePaper  (800×480, 6 colors)
+#   - ESP32-S3 with 8MB PSRAM
+#   - Internal SHT40 temp/humidity sensor
+#   - SPI: CLK=GPIO7, MOSI=GPIO9
+#   - I2C: SDA=GPIO19, SCL=GPIO20
+#
+# IMPORTANT: Framework MUST be "arduino" (not esp-idf) for PSRAM to work.
+#
+# Prerequisites – add to HA configuration.yaml (see ha_weather_templates.yaml).
+# The 3-day forecast data is surfaced as individual template sensors so
+# ESPHome can read each day's condition/high/low as a simple entity.
+################################################################################
+
+esphome:
+  name: reterminal-e1002
+  friendly_name: reTerminal E1002
+  on_boot:
+    priority: 600               # Run early so sensors are ready before display
+    then:
+      - output.turn_on: bsp_battery_enable   # Enable battery ADC circuit
+      - delay: 200ms
+      - component.update: battery_voltage
+      - component.update: battery_level
+
+################################################################################
+# ESP32-S3 — framework MUST be Arduino for 8MB PSRAM support
+################################################################################
+esp32:
+  board: esp32-s3-devkitc-1
+  variant: esp32s3
+  framework:
+    type: arduino
+
+psram:
+  mode: octal
+  speed: 80MHz
+
+################################################################################
+# Core services
+################################################################################
+logger:
+
+api:
+  encryption:
+    key: !secret api_key
+
+ota:
+  - platform: esphome
+    password: !secret ota_password
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  ap:
+    ssid: "Reterminal-E1002"
+    password: !secret ap_password
+
+captive_portal:
+
+################################################################################
+# Time — used to print current date in the header
+################################################################################
+time:
+  - platform: homeassistant
+    id: ha_time
+
+################################################################################
+# GPIO output — enables the battery voltage-divider measurement circuit
+################################################################################
+output:
+  - platform: gpio
+    pin: GPIO21
+    id: bsp_battery_enable
+
+################################################################################
+# I²C bus — internal SHT40 sensor
+################################################################################
+i2c:
+  sda: GPIO19
+  scl: GPIO20
+  scan: false
+
+################################################################################
+# SPI bus — ePaper display (microSD shares the same bus)
+################################################################################
+spi:
+  clk_pin: GPIO7
+  mosi_pin: GPIO9
+
+################################################################################
+# Fonts
+# Three sizes cover title, body, and small/caption text.
+# Inter 700 is a clean sans-serif that reads well on ePaper.
+################################################################################
+font:
+  - file: "gfonts://Inter@700"
+    id: font_large        # Large values (temperatures)
+    size: 52
+
+  - file: "gfonts://Inter@700"
+    id: font_medium       # Section headers, conditions
+    size: 28
+
+  - file: "gfonts://Inter@700"
+    id: font_body         # Labels, hi/lo values
+    size: 22
+
+  - file: "gfonts://Inter@700"
+    id: font_small        # Footer, captions
+    size: 17
+
+################################################################################
+# Sensors — numeric values
+################################################################################
+sensor:
+  # ── Internal SHT40 (Indoor) ─────────────────────────────────────────────────
+  - platform: sht4x
+    address: 0x44
+    update_interval: 1800s
+    temperature:
+      name: "Indoor Temperature"
+      id: indoor_temp
+      unit_of_measurement: "°F"
+      filters:
+        - lambda: return x * 9.0 / 5.0 + 32.0;  # Convert C→F
+    humidity:
+      name: "Indoor Humidity"
+      id: indoor_humidity
+      on_value:
+        then:
+          # Refresh display whenever indoor sensor updates (debounced by ePaper
+          # itself — slow refresh means rapid calls are safely ignored).
+          - component.update: epaper_display
+
+  # ── Outdoor current conditions (from HA OpenWeatherMap entity) ───────────────
+  - platform: homeassistant
+    id: outdoor_temp
+    entity_id: weather.openweathermap
+    attribute: temperature  # HA already in °F if you set Imperial in HA
+
+  - platform: homeassistant
+    id: outdoor_humidity
+    entity_id: weather.openweathermap
+    attribute: humidity
+
+  # ── 3-Day Forecast — high/low temps from HA template sensors ────────────────
+  # (see ha_weather_templates.yaml — add those to your HA config)
+
+  - platform: homeassistant
+    id: fc0_high
+    entity_id: sensor.forecast_day0_high
+
+  - platform: homeassistant
+    id: fc0_low
+    entity_id: sensor.forecast_day0_low
+
+  - platform: homeassistant
+    id: fc1_high
+    entity_id: sensor.forecast_day1_high
+
+  - platform: homeassistant
+    id: fc1_low
+    entity_id: sensor.forecast_day1_low
+
+  - platform: homeassistant
+    id: fc2_high
+    entity_id: sensor.forecast_day2_high
+
+  - platform: homeassistant
+    id: fc2_low
+    entity_id: sensor.forecast_day2_low
+
+  # ── Battery ──────────────────────────────────────────────────────────────────
+  - platform: adc
+    pin: GPIO1
+    name: "Battery Voltage"
+    id: battery_voltage
+    update_interval: 1800s
+    attenuation: 12db
+    filters:
+      - multiply: 2.0   # Voltage divider ×2 compensation
+
+  - platform: template
+    name: "Battery Level"
+    id: battery_level
+    unit_of_measurement: "%"
+    update_interval: never   # Driven from battery_voltage
+    lambda: |-
+      float v = id(battery_voltage).state;
+      if (v >= 4.2) return 100.0;
+      if (v <= 3.2) return 0.0;
+      return (v - 3.2) / (4.2 - 3.2) * 100.0;
+
+################################################################################
+# Text sensors — string values (condition names, day labels)
+################################################################################
+text_sensor:
+  # Current outdoor condition state (e.g. "sunny", "cloudy", "rainy")
+  - platform: homeassistant
+    id: outdoor_condition
+    entity_id: weather.openweathermap
+
+  # Forecast conditions
+  - platform: homeassistant
+    id: fc0_condition
+    entity_id: sensor.forecast_day0_condition
+
+  - platform: homeassistant
+    id: fc0_name
+    entity_id: sensor.forecast_day0_name   # e.g. "Wednesday"
+
+  - platform: homeassistant
+    id: fc1_condition
+    entity_id: sensor.forecast_day1_condition
+
+  - platform: homeassistant
+    id: fc1_name
+    entity_id: sensor.forecast_day1_name
+
+  - platform: homeassistant
+    id: fc2_condition
+    entity_id: sensor.forecast_day2_condition
+
+  - platform: homeassistant
+    id: fc2_name
+    entity_id: sensor.forecast_day2_name
+
+################################################################################
+# ePaper Display — 7.3" E Ink Spectra 6, 800×480, 6 colors
+#
+# Available colors: BLACK WHITE RED GREEN YELLOW BLUE
+# (RED on Spectra 6 renders as a warm orange-red)
+#
+# Layout (all coordinates are x, y from top-left):
+#
+#  ┌──────────────────────────────────────────────────────────────────────────┐
+#  │  HEADER BAR  (y 0–58)  Blue bg / White text  │  Date + battery          │
+#  ├────────────────────────────┬─────────────────────────────────────────────┤
+#  │  INDOOR  (x 0–380)         │  OUTDOOR  (x 400–800)                       │
+#  │  Large °F   Humidity %     │  Large °F   Humidity %   Condition          │
+#  │  (y 70–285)                │  (y 70–285)                                  │
+#  ├────────────────────────────┴─────────────────────────────────────────────┤
+#  │  FORECAST BAR (y 295–480) — three equal panels of ~267 px each          │
+#  │  Panel 0 (Today)  │  Panel 1 (Tomorrow)  │  Panel 2 (Day after)         │
+#  └───────────────────┴──────────────────────┴──────────────────────────────┘
+#
+# update_interval: never — the display is triggered by the SHT40 on_value
+# callback (every 1800 s).  Color ePaper takes ~30 s to refresh, so this is safe.
+################################################################################
+display:
+  - platform: epaper_spi
+    id: epaper_display
+    model: Seeed-reTerminal-E1002   # Requires ESPHome ≥ 2025.11.0
+    update_interval: never
+    lambda: |-
+
+      // ── Color palette ────────────────────────────────────────────────────
+      const auto BLACK  = Color(0,   0,   0,   0);
+      const auto WHITE  = Color(255, 255, 255, 0);
+      const auto RED    = Color(255, 0,   0,   0);
+      const auto GREEN  = Color(0,   200, 0,   0);
+      const auto YELLOW = Color(255, 220, 0,   0);
+      const auto BLUE   = Color(0,   0,   220, 0);
+      const auto NAVY   = Color(0,   0,   160, 0);
+
+      const int W = it.get_width();   // 800
+      const int H = it.get_height();  // 480
+
+      // ── Helper: map condition string → display label + color ─────────────
+      // Returns a short label; writes the matching Color into *col_out.
+      auto condition_info = [&](const std::string &cond, Color &col_out) -> std::string {
+        if (cond == "sunny" || cond == "clear-night") {
+          col_out = YELLOW; return "Sunny";
+        } else if (cond == "partlycloudy") {
+          col_out = YELLOW; return "Pt Cloudy";
+        } else if (cond == "cloudy" || cond == "fog") {
+          col_out = BLACK;  return cond == "fog" ? "Foggy" : "Cloudy";
+        } else if (cond == "rainy" || cond == "pouring") {
+          col_out = BLUE;   return cond == "pouring" ? "Pouring" : "Rainy";
+        } else if (cond == "snowy" || cond == "snowy-rainy") {
+          col_out = BLUE;   return "Snowy";
+        } else if (cond == "lightning" || cond == "lightning-rainy") {
+          col_out = RED;    return "Storms";
+        } else if (cond == "windy" || cond == "windy-variant") {
+          col_out = BLACK;  return "Windy";
+        } else if (cond == "hail") {
+          col_out = BLUE;   return "Hail";
+        } else {
+          col_out = BLACK;  return cond;
+        }
+      };
+
+      // ══════════════════════════════════════════════════════════════════════
+      // SECTION 1 — HEADER BAR  (y: 0–58)
+      // ══════════════════════════════════════════════════════════════════════
+      it.filled_rectangle(0, 0, W, 58, NAVY);
+
+      it.print(16, 14, id(font_medium), WHITE, "WEATHER DASHBOARD");
+
+      // Right side: date + battery
+      auto now = id(ha_time).now();
+      if (now.is_valid()) {
+        char datebuf[32];
+        now.strftime(datebuf, sizeof(datebuf), "%a  %b %d, %Y");
+        it.print(W - 16, 14, id(font_medium), WHITE,
+                 TextAlign::TOP_RIGHT, datebuf);
+      }
+
+      // Battery indicator (bottom-right of header)
+      float batt = id(battery_level).state;
+      it.printf(W - 16, 38, id(font_small), WHITE,
+                TextAlign::TOP_RIGHT, "Battery: %.0f%%", batt);
+
+      // ── Horizontal rule below header ──────────────────────────────────────
+      it.filled_rectangle(0, 58, W, 2, NAVY);
+
+      // ══════════════════════════════════════════════════════════════════════
+      // SECTION 2 — INDOOR  (x: 10–375, y: 70–285)
+      // ══════════════════════════════════════════════════════════════════════
+      it.print(10, 68, id(font_medium), BLUE, "INDOOR");
+      it.filled_rectangle(10, 96, 355, 1, BLACK);   // under-label rule
+
+      // Temperature
+      it.print(10, 104, id(font_body), BLACK, "Temperature");
+      if (!isnan(id(indoor_temp).state)) {
+        it.printf(10, 130, id(font_large), BLACK,
+                  "%.1f°F", id(indoor_temp).state);
+      } else {
+        it.print(10, 130, id(font_large), BLACK, "-- °F");
+      }
+
+      // Humidity
+      it.print(10, 200, id(font_body), BLACK, "Humidity");
+      if (!isnan(id(indoor_humidity).state)) {
+        it.printf(10, 224, id(font_large), BLACK,
+                  "%.0f%%", id(indoor_humidity).state);
+      } else {
+        it.print(10, 224, id(font_large), BLACK, "--%%");
+      }
+
+      // Source label
+      it.print(10, 285, id(font_small), BLACK, "Source: SHT40 (internal)");
+
+      // Vertical divider between indoor/outdoor
+      it.filled_rectangle(385, 68, 2, 218, BLACK);
+
+      // ══════════════════════════════════════════════════════════════════════
+      // SECTION 3 — OUTDOOR  (x: 400–790, y: 70–285)
+      // ══════════════════════════════════════════════════════════════════════
+      it.print(400, 68, id(font_medium), GREEN, "OUTDOOR");
+      it.filled_rectangle(400, 96, 390, 1, BLACK);
+
+      // Temperature
+      it.print(400, 104, id(font_body), BLACK, "Temperature");
+      if (!isnan(id(outdoor_temp).state)) {
+        it.printf(400, 130, id(font_large), BLACK,
+                  "%.1f°F", id(outdoor_temp).state);
+      } else {
+        it.print(400, 130, id(font_large), BLACK, "-- °F");
+      }
+
+      // Humidity
+      it.print(620, 104, id(font_body), BLACK, "Humidity");
+      if (!isnan(id(outdoor_humidity).state)) {
+        it.printf(620, 130, id(font_large), BLACK,
+                  "%.0f%%", id(outdoor_humidity).state);
+      } else {
+        it.print(620, 130, id(font_large), BLACK, "--%%");
+      }
+
+      // Current condition
+      it.print(400, 200, id(font_body), BLACK, "Condition:");
+      if (id(outdoor_condition).has_state()) {
+        Color cond_color = BLACK;
+        auto cond_label = condition_info(id(outdoor_condition).state, cond_color);
+        it.print(400, 224, id(font_medium), cond_color, cond_label.c_str());
+      } else {
+        it.print(400, 224, id(font_medium), BLACK, "Unknown");
+      }
+
+      it.print(400, 285, id(font_small), BLACK, "Source: OpenWeatherMap");
+
+      // ══════════════════════════════════════════════════════════════════════
+      // SECTION 4 — FORECAST  (y: 300–475)
+      // Three equal-width panels; each panel is 266px wide.
+      // ══════════════════════════════════════════════════════════════════════
+
+      // Forecast bar header rule
+      it.filled_rectangle(0, 305, W, 2, BLACK);
+      it.filled_rectangle(0, 305, W, 26, NAVY);
+      it.print(W / 2, 307, id(font_small), WHITE,
+               TextAlign::TOP_CENTER, "3-DAY FORECAST");
+      it.filled_rectangle(0, 331, W, 1, BLACK);
+
+      // Panel geometry
+      const int FC_Y0   = 327;  // top of forecast content
+      const int FC_H    = 148;  // height of each panel
+      const int P_W     = 266;  // panel width
+      const int P_PAD   = 12;   // inner left padding per panel
+
+      // Forecast data arrays for DRY lambda
+      struct FcDay {
+        const char *id_name;
+        const char *id_cond;
+        float high;
+        float low;
+      };
+
+      // Collect from sensors (NaN-safe)
+      float f0h = id(fc0_high).state;
+      float f0l = id(fc0_low).state;
+      float f1h = id(fc1_high).state;
+      float f1l = id(fc1_low).state;
+      float f2h = id(fc2_high).state;
+      float f2l = id(fc2_low).state;
+
+      std::string names[3] = {
+        id(fc0_name).has_state() ? id(fc0_name).state : "Day 1",
+        id(fc1_name).has_state() ? id(fc1_name).state : "Day 2",
+        id(fc2_name).has_state() ? id(fc2_name).state : "Day 3",
+      };
+      std::string conds[3] = {
+        id(fc0_condition).has_state() ? id(fc0_condition).state : "",
+        id(fc1_condition).has_state() ? id(fc1_condition).state : "",
+        id(fc2_condition).has_state() ? id(fc2_condition).state : "",
+      };
+      float highs[3] = {f0h, f1h, f2h};
+      float lows[3]  = {f0l, f1l, f2l};
+
+      for (int p = 0; p < 3; p++) {
+        int x0 = p * P_W + P_PAD;
+
+        // Vertical divider between panels
+        if (p > 0) {
+          it.filled_rectangle(p * P_W, FC_Y0, 1, FC_H, BLACK);
+        }
+
+        // Day name
+        it.print(x0, FC_Y0 + 4, id(font_medium), NAVY,
+                 names[p].substr(0, 3).c_str());  // "Mon", "Tue" etc.
+
+        // Condition
+        Color c_color = BLACK;
+        std::string c_label = condition_info(conds[p], c_color);
+        it.print(x0, FC_Y0 + 36, id(font_body), c_color, c_label.c_str());
+
+        // High temp
+        it.print(x0, FC_Y0 + 72, id(font_small), BLACK, "High:");
+        if (!isnan(highs[p])) {
+          it.printf(x0 + 56, FC_Y0 + 68, id(font_body), RED,
+                    "%.0f°F", highs[p]);
+        } else {
+          it.print(x0 + 56, FC_Y0 + 68, id(font_body), RED, "--");
+        }
+
+        // Low temp
+        it.print(x0, FC_Y0 + 106, id(font_small), BLACK, "Low:");
+        if (!isnan(lows[p])) {
+          it.printf(x0 + 56, FC_Y0 + 102, id(font_body), BLUE,
+                    "%.0f°F", lows[p]);
+        } else {
+          it.print(x0 + 56, FC_Y0 + 102, id(font_body), BLUE, "--");
+        }
+      }
+
+      // Bottom border
+      it.filled_rectangle(0, FC_Y0 + FC_H, W, 2, BLACK);
