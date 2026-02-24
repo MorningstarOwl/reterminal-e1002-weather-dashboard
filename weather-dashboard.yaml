@@ -76,6 +76,23 @@ output:
     id: bsp_battery_enable
 
 ################################################################################
+# Green button — manual display refresh
+# GPIO3 is the top green button (active-low, internal pull-up)
+################################################################################
+binary_sensor:
+  - platform: gpio
+    pin:
+      number: GPIO3
+      mode: INPUT_PULLUP
+      inverted: true
+    name: "Refresh Button"
+    filters:
+      - delayed_on: 50ms    # debounce
+    on_press:
+      then:
+        - component.update: epaper_display
+
+################################################################################
 # I²C bus — internal SHT40 sensor
 ################################################################################
 i2c:
